@@ -1,0 +1,23 @@
+:root {
+  --paper: #f5f6f1;
+  --paper-raised: #ffffff;
+  --ink: #1b2622;
+  --ink-soft: #55625c;
+  --ink-faint: #8a968f;
+  --focus: #e2a33b;
+  --focus-soft: #fbedd3;
+  --lens: #2f6f62;
+  --lens-dark: #1f4e44;
+  --lens-soft: #dceae6;
+  --blur-c: #b9c2be;
+  --line: #dee2da;
+  --danger: #b5482a;
+  --danger-soft: #f6e3dd;
+
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  --radius: 14px;
+  --shadow-card: 0 1px 2px rgba(27, 38, 34, 0.06), 0 8px 24px rgba(27, 38, 34, 0.06);
+}
