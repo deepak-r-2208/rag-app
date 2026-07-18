@@ -60,7 +60,7 @@ def chunk_text(text: str, target_size: int = 700, overlap: int = 120) -> list[Ch
         for sentence in _split_sentences(para):
             # Guard against a single "sentence" (no punctuation at all)
             # that's still longer than the target size on its own.
-            pieces = [sentence] if len(sentence) <= target_size * 1.5 else _hard_split(sentence, target_size)
+            pieces = [sentence] if len(sentence) <= target_size else _hard_split(sentence, target_size)
             for piece in pieces:
                 if len(buffer) + 1 + len(piece) <= target_size:
                     buffer = f"{buffer} {piece}" if buffer else piece

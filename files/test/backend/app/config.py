@@ -27,14 +27,17 @@ class Settings(BaseSettings):
     # http://ollama:11434 (the service name); for non-Docker local dev it
     # defaults to Ollama running on your own machine.
     ollama_base_url: str = "http://localhost:11434"
-    ollama_chat_model: str = "llama3.1:8b"
+    ollama_chat_model: str = "llama3.2:3b"
 
     # Comma-separated list of origins allowed to call this API.
     cors_origins: str = "http://localhost:5173"
 
-    # Retrieval tuning.
-    top_k: int = 5
-    min_relevance_score: float = 0.08
+    # Retrieval tuning. min_relevance_score is the minimum cosine similarity a
+    # chunk needs (or a literal keyword hit) to count as relevant; below it the
+    # app refuses to answer rather than guess. 0.3 suits the bundled Ollama
+    # embedding models — raise it for stricter grounding.
+    top_k: int = 3
+    min_relevance_score: float = 0.3
 
     @property
     def cors_origin_list(self) -> list[str]:

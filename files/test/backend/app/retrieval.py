@@ -11,8 +11,6 @@ from dataclasses import dataclass
 
 import asyncpg
 
-from app.embeddings import embed_query
-
 RRF_K = 60
 CANDIDATE_POOL = 25  # how many results to pull from each ranking system before fusing
 
@@ -34,36 +32,40 @@ async def hybrid_search(
     embedding_model: str,
     hybrid_weight: float,
     top_k: int,
+    query_vector: list[float] | None = None,
 ) -> list[RetrievedChunk]:
-    lexical_rows = await conn.fetch(
-        """
-        select c.id, c.content, d.name as doc_name,
-               ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) as raw_score
-        from chunks c
-        join documents d on d.id = c.document_id
-        where c.user_id = $1
-          and c.content_tsv @@ plainto_tsquery('english', $2)
-        order by raw_score desc
-        limit $3
-        """,
-        user_id, query, CANDIDATE_POOL,
-    )
+    lexical_rows = []
+    if hybrid_weight < 1:
+        lexical_rows = await conn.fetch(
+            """
+            select c.id, c.content, d.name as doc_name,
+                   ts_rank_cd(c.content_tsv, plainto_tsquery('english', $2)) as raw_score
+            from chunks c
+            join documents d on d.id = c.document_id
+            where c.user_id = $1
+              and c.content_tsv @@ plainto_tsquery('english', $2)
+            order by raw_score desc
+            limit $3
+            """,
+            user_id, query, CANDIDATE_POOL,
+        )
 
-    query_vector = await embed_query(query, embedding_model)
-    vector_rows = await conn.fetch(
-        """
-        select c.id, c.content, d.name as doc_name,
-               1 - (e.embedding <=> $2) as raw_score
-        from chunk_embeddings e
-        join chunks c on c.id = e.chunk_id
-        join documents d on d.id = c.document_id
-        where c.user_id = $1
-          and e.model_name = $3
-        order by e.embedding <=> $2
-        limit $4
-        """,
-        user_id, query_vector, embedding_model, CANDIDATE_POOL,
-    )
+    vector_rows = []
+    if hybrid_weight > 0 and query_vector is not None:
+        vector_rows = await conn.fetch(
+            """
+            select c.id, c.content, d.name as doc_name,
+                   1 - (e.embedding <=> $2) as raw_score
+            from chunk_embeddings e
+            join chunks c on c.id = e.chunk_id
+            join documents d on d.id = c.document_id
+            where c.user_id = $1
+              and e.model_name = $3
+            order by e.embedding <=> $2
+            limit $4
+            """,
+            user_id, query_vector, embedding_model, CANDIDATE_POOL,
+        )
 
     lexical_rank = {row["id"]: i for i, row in enumerate(lexical_rows)}
     vector_rank = {row["id"]: i for i, row in enumerate(vector_rows)}
@@ -99,10 +101,38 @@ async def hybrid_search(
     if not fused:
         return []
 
-    # Normalize fused scores to 0..1 against the best match so the UI/threshold
-    # logic doesn't depend on RRF's small absolute magnitudes.
+    # Normalize fused scores to 0..1 against the best match, purely for display
+    # (the focus-stack blur/opacity). Do NOT gate relevance on this — the top is
+    # always 1.0 by construction, so it can't tell a real match from a weak one.
+    # Grounding decisions use raw cosine/lexical scores instead (select_relevant).
     top_score = fused[0].score or 1e-9
     for c in fused:
         c.score = c.score / top_score
 
     return fused[:top_k]
+
+
+def select_relevant(chunks: list[RetrievedChunk], min_cosine: float) -> list[RetrievedChunk]:
+    """Anti-hallucination gate. Keep only chunks with a real signal: cosine
+    >= min_cosine, or a literal keyword hit (lexical_score > 0 means
+    plainto_tsquery actually matched).
+
+    Runs on absolute scores, NOT the RRF-normalized score, so an off-topic
+    question whose nearest neighbours are all weak (cosine ~0.15) yields [] and
+    the caller refuses to answer instead of feeding the model junk context.
+    """
+    return [c for c in chunks if c.vector_score >= min_cosine or c.lexical_score > 0.0]
+
+
+def grounding_confidence(chunks: list[RetrievedChunk]) -> str:
+    """Confidence label from the strongest raw cosine similarity in the kept set.
+    Pure keyword matches (no vector signal) count as medium — exact term hits
+    are high-precision even at cosine 0."""
+    best = max((c.vector_score for c in chunks), default=0.0)
+    if best >= 0.70:
+        return "high"
+    if best >= 0.50:
+        return "medium"
+    if best > 0.0:
+        return "low"
+    return "medium"

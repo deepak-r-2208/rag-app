@@ -11,8 +11,6 @@ give a real fast/quality tradeoff — see sql/schema.sql for how that's
 handled (a dimension-agnostic `vector` column rather than a fixed size).
 """
 
-import asyncio
-
 import httpx
 
 from app.config import get_settings
@@ -41,13 +39,6 @@ async def embed_texts(texts: list[str], model_name: str = DEFAULT_MODEL) -> list
         resp.raise_for_status()
         data = resp.json()
     return data["embeddings"]
-
-
-async def embed_all_models(texts: list[str]) -> dict[str, list[list[float]]]:
-    """Embed the same texts with every registered model, concurrently."""
-    names = available_models()
-    results = await asyncio.gather(*(embed_texts(texts, name) for name in names))
-    return dict(zip(names, results))
 
 
 async def embed_query(query: str, model_name: str = DEFAULT_MODEL) -> list[float]:

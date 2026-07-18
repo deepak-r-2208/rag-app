@@ -54,7 +54,12 @@ async def ask_llm(
     async with httpx.AsyncClient(timeout=180) as client:
         resp = await client.post(
             f"{settings.ollama_base_url}/api/chat",
-            json={"model": settings.ollama_chat_model, "messages": messages, "stream": False},
+            json={
+                "model": settings.ollama_chat_model,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": 160},
+            },
         )
         resp.raise_for_status()
         data = resp.json()

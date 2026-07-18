@@ -1,21 +1,21 @@
 """Chat session history plus the core ask-a-question flow.
 
 The /ask endpoint is where features #4 (no hallucination), #8 (hybrid
-search) and #9 (chat history) meet: it runs hybrid retrieval, refuses to
-call the model at all if nothing relevant was found, otherwise asks Claude
-with a context-only prompt, then persists both the question and the
-grounded answer (with its sources) to the session.
+search) and #9 (chat history) meet. It persists the user's question, runs
+retrieval, refuses to call the model when nothing relevant was found, and
+then stores the grounded answer and its sources.
 """
 
 import json
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.llm_client import ask_llm
 from app.config import get_settings
 from app.db import get_pool
-from app.embeddings import DEFAULT_MODEL
-from app.retrieval import hybrid_search
+from app.embeddings import DEFAULT_MODEL, embed_query
+from app.retrieval import grounding_confidence, hybrid_search, select_relevant
 from app.schemas import (
     AskRequest, AskResponse, ChatMessageOut, ChatSessionDetail, ChatSessionOut, SourceChunk,
 )
@@ -108,21 +108,52 @@ async def ask(body: AskRequest, user: CurrentUser = Depends(get_current_user)):
 
         has_documents = await conn.fetchval("select 1 from documents where user_id = $1 limit 1", user_uuid)
 
+        # Load history before adding the current question; ask_llm appends it
+        # itself. Keep this database work short and never hold a connection
+        # while Ollama is generating an answer.
+        history_rows = await conn.fetch(
+            """
+            select role, content from (
+                select role, content, created_at
+                from chat_messages
+                where session_id = $1
+                order by created_at desc
+                limit 8
+            ) recent
+            order by created_at asc
+            """,
+            session_uuid,
+        )
+        history = [{"role": row["role"], "content": row["content"]} for row in history_rows]
+
+        if not history:
+            await conn.execute(
+                "update chat_sessions set title = $2 where id = $1 and title = 'New conversation'",
+                session_uuid, body.question[:48],
+            )
+
         await conn.execute(
             "insert into chat_messages (session_id, role, content) values ($1, 'user', $2)",
             session_uuid, body.question,
         )
 
-        if not has_documents:
-            answer, sources, confidence = (
-                "You haven't added any documents yet. Upload files, then ask again.",
-                [], "none",
-            )
-        else:
-            ranked = await hybrid_search(
-                conn, user_uuid, body.question, embedding_model, hybrid_weight, settings.top_k
-            )
-            relevant = [c for c in ranked if c.score >= settings.min_relevance_score]
+    if not has_documents:
+        answer, sources, confidence = (
+            "You haven't added any documents yet. Upload files, then ask again.",
+            [], "none",
+        )
+    else:
+        try:
+            # A keyword-only search does not need an embedding request. This
+            # keeps the selected retrieval mode honest and avoids needless
+            # local model work.
+            query_vector = await embed_query(body.question, embedding_model) if hybrid_weight > 0 else None
+            async with pool.acquire() as conn:
+                ranked = await hybrid_search(
+                    conn, user_uuid, body.question, embedding_model, hybrid_weight,
+                    settings.top_k, query_vector,
+                )
+            relevant = select_relevant(ranked, settings.min_relevance_score)
 
             if not relevant:
                 answer, sources, confidence = (
@@ -131,35 +162,38 @@ async def ask(body: AskRequest, user: CurrentUser = Depends(get_current_user)):
                     [], "none",
                 )
             else:
-                history_rows = await conn.fetch(
-                    "select role, content from chat_messages where session_id = $1 order by created_at asc",
-                    session_uuid,
-                )
-                history = [{"role": r["role"], "content": r["content"]} for r in history_rows[:-1]][-8:]
-
                 answer = await ask_llm(relevant, body.question, history)
+                if not answer:
+                    answer = "I couldn't generate a grounded answer from the retrieved passages. Please try again."
                 sources = relevant
-                top = relevant[0].score
-                confidence = "high" if top > 0.75 else "medium" if top > 0.4 else "low"
+                confidence = grounding_confidence(relevant)
+        except httpx.HTTPError:
+            answer, sources, confidence = (
+                "I couldn't reach the local retrieval or answer service. Check that Ollama is running and its "
+                "configured models have been pulled, then try again.",
+                [], "none",
+            )
 
-        sources_json = json.dumps(
-            [
-                {
-                    "doc_name": c.doc_name, "text": c.text, "score": c.score,
-                    "lexical_score": c.lexical_score, "vector_score": c.vector_score,
-                }
-                for c in sources
-            ]
-        )
-        message_row = await conn.fetchrow(
-            """
-            insert into chat_messages (session_id, role, content, sources, confidence)
-            values ($1, 'assistant', $2, $3::jsonb, $4)
-            returning id, role, content, sources, confidence, created_at
-            """,
-            session_uuid, answer, sources_json, confidence,
-        )
-        await conn.execute("update chat_sessions set updated_at = now() where id = $1", session_uuid)
+    sources_json = json.dumps(
+        [
+            {
+                "doc_name": c.doc_name, "text": c.text, "score": c.score,
+                "lexical_score": c.lexical_score, "vector_score": c.vector_score,
+            }
+            for c in sources
+        ]
+    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            message_row = await conn.fetchrow(
+                """
+                insert into chat_messages (session_id, role, content, sources, confidence)
+                values ($1, 'assistant', $2, $3::jsonb, $4)
+                returning id, role, content, sources, confidence, created_at
+                """,
+                session_uuid, answer, sources_json, confidence,
+            )
+            await conn.execute("update chat_sessions set updated_at = now() where id = $1", session_uuid)
 
     return AskResponse(session_id=str(session_uuid), message=_row_to_message(message_row))
 

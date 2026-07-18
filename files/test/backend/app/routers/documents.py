@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, UploadFile
 
 from app import chunking, parsing
 from app.db import get_pool
-from app.embeddings import embed_all_models
+from app.embeddings import DEFAULT_MODEL, embed_texts
 from app.schemas import DocumentOut, UploadResponse
 from app.security import CurrentUser, get_current_user
 from app.utils import parse_uuid
@@ -52,6 +52,11 @@ async def upload_documents(
     response = UploadResponse()
     user_uuid = parse_uuid(user.id, "user id")
 
+    async with pool.acquire() as conn:
+        embedding_model = await conn.fetchval(
+            "select embedding_model from user_settings where user_id = $1", user_uuid
+        ) or DEFAULT_MODEL
+
     for file in files:
         try:
             text = await parsing.extract_text(file)
@@ -67,10 +72,11 @@ async def upload_documents(
             ext = parsing.extension_of(file.filename or "")
             texts = [p.text for p in pieces]
 
-            # Compute embeddings for every registered model up front (in
-            # parallel) so the user can switch models later without
-            # re-uploading documents.
-            model_vectors = await embed_all_models(texts)
+            # Index only the model the user selected. Running both local
+            # embedding models made every upload wait for unnecessary work.
+            vectors = await embed_texts(texts, embedding_model)
+            if len(vectors) != len(texts):
+                raise RuntimeError("Embedding service returned an incomplete result")
 
             async with pool.acquire() as conn:
                 async with conn.transaction():
@@ -96,14 +102,13 @@ async def upload_documents(
                         )
                         chunk_ids.append(row["id"])
 
-                    for model_name, vectors in model_vectors.items():
-                        await conn.executemany(
-                            """
-                            insert into chunk_embeddings (chunk_id, model_name, embedding)
-                            values ($1, $2, $3)
-                            """,
-                            [(cid, model_name, vec) for cid, vec in zip(chunk_ids, vectors)],
-                        )
+                    await conn.executemany(
+                        """
+                        insert into chunk_embeddings (chunk_id, model_name, embedding)
+                        values ($1, $2, $3)
+                        """,
+                        [(chunk_id, embedding_model, vector) for chunk_id, vector in zip(chunk_ids, vectors)],
+                    )
 
             response.documents.append(
                 DocumentOut(

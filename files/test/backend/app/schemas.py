@@ -2,13 +2,21 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class SignupRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     email: EmailStr
     password: str = Field(min_length=6, max_length=72)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Name cannot be blank")
+        return value
 
 
 class VerifyRequest(BaseModel):
@@ -70,6 +78,14 @@ class ChatSessionDetail(ChatSessionOut):
 class AskRequest(BaseModel):
     session_id: str | None = None
     question: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("question")
+    @classmethod
+    def question_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Question cannot be blank")
+        return value
 
 
 class AskResponse(BaseModel):

@@ -2,7 +2,7 @@
 
 No external auth provider — this all runs on your own server. Tokens are
 plain JWTs signed with JWT_SECRET (see config.py); passwords are hashed
-with bcrypt via passlib. Nothing here talks to a third-party service.
+with bcrypt. Nothing here talks to a third-party service.
 """
 
 import datetime

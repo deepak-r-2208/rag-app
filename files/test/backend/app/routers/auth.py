@@ -8,7 +8,7 @@ code here as usual and add a call to any mail provider before returning
 the response — everything else in this file stays the same.
 """
 
-import random
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _gen_code() -> str:
-    return f"{random.randint(0, 999999):06d}"
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def _user_out(row) -> dict:
